@@ -21,6 +21,57 @@ extern void sec_bat_initial_check(void);
 extern bool sec_bat_check_jig_status(void);
 bool slate_mode_state;
 
+//---------------------------------------------------------------------------
+// Patch to allow to set the battery floating voltage, to keep the battery
+// charged around a certain percentage.
+// This is a kobject, to dynamically set how topped-up the battery should be
+//---------------------------------------------------------------------------
+
+// Global battery. Here goes hoping we only ever have a single battery (kernel object)
+static struct sec_battery_info *global_battery = NULL;
+
+static ssize_t show_float_volt_max(struct kobject *kobj, struct kobj_attribute *attr, char *buf) {
+    union power_supply_propval val;
+    if (!global_battery) {
+        printk(KERN_INFO "battery not initialized yet, please try again\n");
+        return -EAGAIN;
+    }
+
+    psy_do_property(global_battery->pdata->charger_name, get, POWER_SUPPLY_PROP_VOLTAGE_MAX, val);
+    return sprintf(buf, "%d\n", val.intval);
+}
+
+static ssize_t store_float_volt_max(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count) {
+    unsigned res;
+    unsigned normalVoltage;
+    unsigned dropVoltage;
+    union power_supply_propval val;
+
+    if (!global_battery) {
+        printk(KERN_INFO "battery not initialized yet, please try again\n");
+        return -EAGAIN;
+    }
+
+    sscanf(buf, "%u", &res);
+
+    normalVoltage = global_battery->pdata->swelling_normal_float_voltage;
+    dropVoltage = global_battery->pdata->swelling_drop_float_voltage;
+    if (res > normalVoltage) {
+        dev_dbg(global_battery->dev, "%s: out-of-range parameter for float voltage, capping to %u\n", __func__, normalVoltage);
+        res = normalVoltage;
+    }
+    if (res < dropVoltage) {
+        dev_dbg(global_battery->dev, "%s: lowering voltage below 4.20V this seems to be a good range for the float voltage\n", __func__);
+    }
+
+    val.intval = res;
+    psy_do_property(global_battery->pdata->charger_name, set, POWER_SUPPLY_PROP_VOLTAGE_MAX, val);
+    return count;
+}
+
+static struct kobj_attribute fvm_attrb = __ATTR(float_volt_max, 0666, show_float_volt_max, store_float_volt_max);
+static struct kobject *kobj;
+//---------------------------------------------------------------------------
 static struct device_attribute sec_battery_attrs[] = {
 	SEC_BATTERY_ATTR(batt_reset_soc),
 	SEC_BATTERY_ATTR(batt_read_raw_soc),
@@ -5519,6 +5570,7 @@ static int sec_battery_probe(struct platform_device *pdev)
 	battery = kzalloc(sizeof(*battery), GFP_KERNEL);
 	if (!battery)
 		return -ENOMEM;
+	global_battery = battery;
 
 	if (pdev->dev.of_node) {
 		pdata = devm_kzalloc(&pdev->dev,
@@ -6086,6 +6138,14 @@ static struct platform_driver sec_battery_driver = {
 
 static int __init sec_battery_init(void)
 {
+    int ret;
+    kobj = kobject_create_and_add("sm-t280_maxV", NULL);
+    if (!kobj) return -ENOMEM;
+    ret = sysfs_create_file(kobj, &fvm_attrb.attr);
+    if (ret) {
+        kobject_put(kobj);
+        return ret;
+    }
 	return platform_driver_register(&sec_battery_driver);
 }
 
